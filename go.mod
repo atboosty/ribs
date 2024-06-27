@@ -1,4 +1,4 @@
-module github.com/lotus-web3/ribs
+module github.com/atboosty/ribs
 
 go 1.21
 
