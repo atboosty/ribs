@@ -283,19 +283,15 @@ func (r *ribBatch) Unlink(ctx context.Context, c []mh.Multihash) error {
 }
 
 func (r *ribBatch) Delete(ctx context.Context, c []mh.Multihash) error {
-	sizes := make([]int32, len(c))
-
-	r.r.index.GetSizes(ctx, c, func(s []int32) error {
-		copy(sizes, s)
-		return nil
-	})
-
-	_, err := r.r.withWritableGroup(ctx, r.currentWriteTarget, func(g *Group) error {
-		return g.Delete(ctx, c, sizes)
+	gk, err := r.r.withWritableGroup(ctx, r.currentWriteTarget, func(g *Group) error {
+		return g.Delete(ctx, c)
 	})
 	if err != nil {
 		return xerrors.Errorf("write to group: %w", err)
 	}
+
+	r.toFlush[gk] = struct{}{}
+	r.currentWriteTarget = gk
 
 	return nil
 }

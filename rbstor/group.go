@@ -289,11 +289,37 @@ func (m *Group) Unlink(ctx context.Context, c []mh.Multihash) error {
 	panic("implement me")
 }
 
-func (m *Group) Delete(ctx context.Context, c []mh.Multihash, sz []int32) error {
+func (m *Group) Delete(ctx context.Context, c []mh.Multihash) error {
 	m.dataLk.Lock()
 	defer m.dataLk.Unlock()
 
-	m.jb.Delete(c, sz)
+	eg := new(errgroup.Group)
+
+	eg.Go(func() error {
+		// delete from jbob
+		err := m.jb.Delete(c)
+		if err != nil {
+			return xerrors.Errorf("data delete: %w", err)
+		}
+
+		return nil
+	})
+
+	eg.Go(func() error {
+		// delete from pebble index
+		err := m.index.DropGroupForceDelete(ctx, c, m.id)
+		if err != nil {
+			return xerrors.Errorf("index delete: %w", err)
+		}
+
+		return m.index.Sync(ctx)
+	})
+
+	if err := eg.Wait(); err != nil {
+		return xerrors.Errorf("data/index delete: %w", err)
+	}
+
+	// m.Sync(ctx)
 
 	return nil
 }

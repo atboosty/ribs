@@ -507,6 +507,108 @@ func (j *CarLog) truncate(offset, size int64, onRemove TruncCleanup) error {
 	return nil
 }
 
+func (j *CarLog) delete_block(offset, size int64, c []mh.Multihash, onRemove TruncCleanup) error {
+	if j.wIdx == nil {
+		return xerrors.Errorf("cannot truncate a read-only jbob")
+	}
+
+	if onRemove == nil {
+		return xerrors.Errorf("onRemove callback is nil")
+	}
+
+	listStart := time.Now()
+
+	log.Errorw("truncate", "offset", offset, "size", size, "diff", size-offset, "idxEnts", len(c), "dataPath", j.DataPath, "listTime", time.Since(listStart))
+
+	if len(c) > 0 {
+		for i, multihash := range c {
+			log.Errorw("truncate", "idx", i, "multihash", multihash)
+		}
+
+		if err := onRemove(offset, c); err != nil {
+			return xerrors.Errorf("truncate callback error: %w", err)
+		}
+		if err := j.wIdx.Del(c); err != nil {
+			return xerrors.Errorf("deleting multihashes from jbob index: %w", err)
+		}
+	} else {
+		return nil
+	}
+
+	if err := j.deleteContent(j.data, offset, size); err != nil {
+		return xerrors.Errorf("deleting content from data file: %w", err)
+	}
+
+	j.dataLen = j.dataLen - size
+
+	// Update the head
+	err := j.mutHead(func(h *Head) error {
+		h.RetiredAt = j.dataLen
+		return nil
+	})
+
+	if err != nil {
+		return xerrors.Errorf("updating head after truncate: %w", err)
+	}
+
+	return nil
+}
+
+// deleteContent removes content from a file at the given offset and length.
+// TODO: optimize for handling big files.
+func (j *CarLog) deleteContent(file *os.File, offset, length int64) error {
+	// Get file size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return xerrors.Errorf("failed to get file info: %w", err)
+	}
+	fileSize := fileInfo.Size()
+
+	// Check if the offset and length are valid
+	if offset < 0 || offset >= fileSize || length < 0 || offset+length > fileSize {
+		return xerrors.Errorf("invalid offset or length")
+	}
+
+	log.Debugf("File size: %d, Offset: %d, Length: %d\n", fileSize, offset, length)
+
+	// Read the content after the portion to be deleted
+	remainingSize := fileSize - (offset + length)
+	remainingContent := make([]byte, remainingSize)
+	_, err = file.ReadAt(remainingContent, offset+length)
+	if err != nil && err != io.EOF {
+		return xerrors.Errorf("failed to read remaining content: %w", err)
+	}
+
+	log.Debugf("Remaining content: %s\n", string(remainingContent))
+
+	// Truncate the file to the size before the portion to be deleted
+	err = file.Truncate(offset)
+	if err != nil {
+		return xerrors.Errorf("failed to truncate file: %w", err)
+	}
+
+	// Seek to the offset position
+	_, err = file.Seek(offset, 0)
+	if err != nil {
+		return xerrors.Errorf("failed to seek to offset: %w", err)
+	}
+
+	// Write the remaining content back to the file
+	_, err = file.Write(remainingContent)
+	if err != nil {
+		return xerrors.Errorf("failed to write remaining content: %w", err)
+	}
+
+	// Flush changes to disk
+	err = file.Sync()
+	if err != nil {
+		return xerrors.Errorf("failed to sync file: %w", err)
+	}
+
+	log.Debug("Content successfully deleted and file synced.")
+	return nil
+}
+
 func (j *CarLog) fixLevelIndex(h Head, w WritableIndex) error {
 	mhsBuf := make([]mh.Multihash, 0, 50000)
 	offsBuf := make([]int64, 0, 50000)
@@ -764,7 +866,7 @@ func (j *CarLog) flushBuffered() error {
 	return nil
 }
 
-func (j *CarLog) Delete(c []mh.Multihash, sz []int32) error {
+func (j *CarLog) Delete(c []mh.Multihash) error {
 	j.idxLk.RLock()
 	defer j.idxLk.RUnlock()
 
@@ -772,35 +874,24 @@ func (j *CarLog) Delete(c []mh.Multihash, sz []int32) error {
 		return xerrors.Errorf("cannot write to read-only (or closing) jbob")
 	}
 
-	if len(c) != len(sz) {
-		return xerrors.Errorf("hash list length doesn't match block sizes length")
-	}
-
-	// delete indexes
-	err := j.wIdx.Del(c)
-	if err != nil {
-		return xerrors.Errorf("deleting index: %w", err)
-	}
-
 	offs, err := j.rIdx.Get(c)
 	if err != nil {
 		return xerrors.Errorf("getting value locations: %w", err)
 	}
 
-	for i, off := range offs {
+	for _, off := range offs {
 		if off == -1 {
 			continue
 		}
 
-		// seems cleans up carlog and the index
-		j.truncate(off, int64(sz[i]), func(to int64, h []mh.Multihash) error {
+		off, length := fromOffsetLen(off)
+
+		j.delete_block(off, int64(length), c, func(to int64, h []mh.Multihash) error {
+			log.Debugf("deleted block", "offset", to, "block hash", h)
+
 			return nil
 		})
 	}
-
-	// Finalize ???
-	ctx := context.Background()
-	j.Finalize(ctx)
 
 	return nil
 }

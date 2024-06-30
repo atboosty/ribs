@@ -46,6 +46,11 @@ func (m *MeteredIndex) DropGroup(ctx context.Context, mh []multihash.Multihash, 
 	return m.sub.DropGroup(ctx, mh, group)
 }
 
+func (m *MeteredIndex) DropGroupForceDelete(ctx context.Context, mh []multihash.Multihash, group iface.GroupKey) error {
+	atomic.AddInt64(&m.writes, int64(len(mh)))
+	return m.sub.DropGroupForceDelete(ctx, mh, group)
+}
+
 func NewMeteredIndex(sub iface.Index) *MeteredIndex {
 	return &MeteredIndex{sub: sub}
 }
