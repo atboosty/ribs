@@ -247,6 +247,40 @@ func (i *PebbleIndex) DropGroup(ctx context.Context, mh []multihash.Multihash, g
 	return nil
 }
 
+// DropGroupForceDelete revised version of the above code snippet: delete size key entirely
+func (i *PebbleIndex) DropGroupForceDelete(ctx context.Context, mh []multihash.Multihash, group iface.GroupKey) error {
+	i.dropLk.Lock()
+	defer i.dropLk.Unlock()
+
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(group))
+
+	batch := i.db.NewBatch()
+	defer batch.Close()
+
+	for _, m := range mh {
+		key := append(append([]byte("i:"), m...), b...)
+		if err := batch.Delete(key, pebble.NoSync); err != nil {
+			return xerrors.Errorf("dropgroup delete: %w", err)
+		}
+
+		// Just drop the key, should be revised if it's actually a good solution
+		// and what are the consequences.
+		sizeKey := append([]byte("s:"), m...)
+		if err := batch.Delete(sizeKey, pebble.NoSync); err != nil {
+			return xerrors.Errorf("dropgroup delete sizeKey: %w", err)
+		}
+	}
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return xerrors.Errorf("dropgroup commit: %w", err)
+	}
+
+	// todo: gc size keys
+
+	return nil
+}
+
 const averageEntrySize = 35 + 8 // multihash is ~35 bytes, groupkey is 8 bytes
 
 func (i *PebbleIndex) EstimateSize(ctx context.Context) (int64, error) {
